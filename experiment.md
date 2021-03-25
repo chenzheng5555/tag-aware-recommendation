@@ -1,6 +1,4 @@
-# Python
-
-### 输入
++ python输入
 
 ```python
 print("%s %5d"%("%输出",5))
@@ -19,13 +17,6 @@ print(f"f\"\"输出:{5:5}{'123'}")  # {}里不能用""?
       if img.mode != 'RGB':
           img = img.convert('RGB')
   ```
-
-  
-
-# TensorFlow
-
-
-
 
 
 # Pytorch
@@ -103,8 +94,6 @@ for name, param in model.named_parameters():
 
 
 # Torch_gometric
-
-
 
 ## MessagePassing
 
