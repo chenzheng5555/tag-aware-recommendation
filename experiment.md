@@ -87,9 +87,7 @@ for name, param in model.named_parameters():
     print(name, param)  #param.size()
 ```
 
-## 调整学习率
-
-[参考](https://zhuanlan.zhihu.com/p/80876299)
++ 调整学习率：[参考](https://zhuanlan.zhihu.com/p/80876299)。
 
 
 
@@ -181,6 +179,19 @@ Exception has occurred: ModuleNotFoundError
 No module named 'torch'
 # 注释掉后则会使用base环境里python解析器和模块
 ```
+
+
+
++ torch_geometric错误，原因：安装torch_geometric是与torch的版本不匹配。
+
+```
+OSError: /home/10101002/anaconda3/lib/python3.7/site-packages/torch_sparse/_version.so: undefined symbol: _ZN3c105ErrorC1ENS_14SourceLocationERKSs
+```
+
++ [CUDA（工作台）与cuDNN（帮手）](https://www.jianshu.com/p/622f47f94784)，
++ 从.py文件导入类，出现`invalid syntax `；应该是.py文件有错。
+
+
 
 
 
