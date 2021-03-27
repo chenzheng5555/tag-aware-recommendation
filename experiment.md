@@ -116,6 +116,8 @@ def propagate(self, edge_index: Adj, size: Size = None, **kwargs):
 
 # GPU
 
+使用GPU，需要将**模型参数和数据**都转变到GPU上，`.to(device)`
+
 + 参数模型训练和数据加载的时间差
 
 ```python
