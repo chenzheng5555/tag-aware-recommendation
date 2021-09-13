@@ -1,240 +1,133 @@
-import numpy as np
-from collections import defaultdict
-import random
+
+import time
 import os
+import numpy as np
+import scipy.sparse as sp
 
 
-def printc(values="", c='=', k=5):
-    print(f"{c*k}", end="")
-    print(values)
-
-
-def neg_sample(pos, sam_k, len_pos):
+#------------------------------file data--------------------------------------
+def read_knowledge_data(file_dir, file_name):
+    '''file data format:`entity_head relation entity_tail`\n
+    or tag_assignment:`user item tag`
     '''
-    from range(0,len_pos) sample sam_k*len(pos) integers that not in pos 
-    '''
-    neg = []
-    for _ in pos:
-        for _ in range(sam_k):
-            while True:
-                j = np.random.randint(0, len_pos)
-                if j not in pos:
-                    neg.append(j)
-                    break
-    return neg
+    start = time.time()
+    file = os.path.join(file_dir, file_name)
+    data = np.loadtxt(file, dtype=np.int32)
+    uniq_data = np.unique(data, axis=0)
+
+    print(f"got data from {file}, time spend:{(time.time()-start)/60:.2}")
+    print(f"\tfile data info [repeat knowledge {len(data)-len(uniq_data)}]")
+    return uniq_data
 
 
-def check(dic, ke, cnt):
-    if ke in dic.keys():
-        return cnt
-    else:
-        dic[ke] = cnt
-        cnt += 1
-        return cnt
+def read_interaction_data(file_dir, file_name):
+    '''file data format:`u i1 i2 ...\n`'''
+    start = time.time()
+    u_items_dict = dict()
+    rep_u, rep_i = 0, 0
+    file = os.path.join(file_dir, file_name)
 
-
-def write_file(file_name, dic):
-    with open(file_name, 'w') as f:
-        for k, v in dic.items():
-            f.write(str(k) + ' ' + str(v) + '\n')
-
-
-def deal_index_fuc(user_item, tagging=None, out_txt=False):
-    '''
-    delete the index that has never appear,only can deal the dict and list type.\n
-    dict: key and values are different class\n
-    list: each column is a class
-    '''
-    printc('deal the index')
-
-    cnt = [0, 0, 0]
-    maps = [dict() for _ in range(3)]
-    new_user_item = defaultdict(list)
-    for k in user_item.keys():
-        cnt[0] = check(maps[0], k, cnt[0])
-        for i in user_item[k]:
-            cnt[1] = check(maps[1], i, cnt[1])
-            new_user_item[maps[0][k]].append(maps[1][i])
-
-    if tagging != None:
-        new_tagging = []
-        for line in tagging:
-            for i, k in enumerate(line):
-                cnt[i] = check(maps[i], k, cnt[i])
-            new_tagging.append([maps[i][k] for i, k in enumerate(line)])
-        tagging = new_tagging
-
-    printc(f"done, the lens of maps are: {[len(m) for m in maps]}")
-
-    if out_txt:
-        for i, m in enumerate(maps):
-            write_file("map_file_%d_txt" % i, m)
-
-    return new_user_item, tagging, [len(m) for m in maps]
-
-
-def data_split(user_items, train_rate, valid_rate=None):
-    '''
-    using user_items data to split trainset,validset,testset.\n
-    user_items: is dict type
-    '''
-    printc("split train, valid, test data from all items of each user")
-    test_set = dict()
-    train_set = dict()
-    valid_set = dict()
-    user_no_train = []
-    for u in user_items.keys():
-        train = random.sample(list(user_items[u]), int(len(user_items[u]) * train_rate))
-        if len(train) == 0:
-            user_no_train.append(u)
-        else:
-            train_set[u] = train
-        test = set(user_items[u]).difference(set(train))
-        if valid_rate == None:
-            test_set[u] = list(test)
-            continue
-        valid = random.sample(list(test), int(len(user_items[u]) * valid_rate))
-        if len(valid) != 0:
-            valid_set[u] = valid
-        test_set[u] = list(test.difference(set(valid)))
-
-    printc(f"number user no train data:{[len(user_no_train)]}")
-    return train_set, test_set, valid_set
-
-
-def get_edge(train_set, num_user, num_item, tagging_data=None):
-    '''
-    use train_set data and taggging_data if given to get the graph
-    return edge_index,weight,transTag
-    '''
-    printc("constract the graph edge_index from train_set")
-    edge_index = set()
-    weight = defaultdict(int)
-    u_i = defaultdict(set)
-    user_tag = defaultdict(set)  # the items that user u assign tag t
-    item_tag = defaultdict(set)  # the users who assign tag t to item i
-
-    for u in train_set.keys():
-        for i in train_set[u]:
-            ii = i + num_user
-            weight[(u, ii)] = weight[(ii, u)] = 1
-            edge_index.add((u, ii))
-            edge_index.add((ii, u))
-
-    if tagging_data == None:
-        return edge_index, None, None
-
-    for tagging in tagging_data:
-        u, i, t = tagging
-        u_i[(u, i)].add(t)
-    for u in train_set.keys():
-        for i in train_set[u]:
-            if (u, i) in u_i.keys():
-                for t in u_i[(u, i)]:
-                    tt = t + num_user + num_item
-                    weight[(tt, u)] = weight[(u, tt)] = weight[(u, tt)] + 1
-                    weight[(tt, ii)] = weight[(ii, tt)] = weight[(ii, tt)] + 1
-                    edge_index.add((u, tt))
-                    edge_index.add((tt, u))
-                    edge_index.add((ii, tt))
-                    edge_index.add((tt, ii))
-                    user_tag[(u, t)].add(i)
-                    item_tag[(i, t)].add(u)
-
-    return edge_index, weight, (user_tag, item_tag)  # construct transTag
-
-
-def data_statistic(data):
-    '''
-    statistic of the data(list or dict),return [max_user+1,max_item+1,(max_tag)+1]
-    '''
-    user, item = [], []
-    cnt = 0
-    if isinstance(data, defaultdict):
-        rep = dict()
-        for u in data.keys():
-            items = data[u]
-            if len(items) != len(set(items)):
-                rep[u] = len(items) - len(set(items))
-                data[u] = list(set(items))  # delete repeat item
-            cnt += len(data[u])
-            user.append(u)
-            item.extend(items)
-        if len(rep) != 0:
-            printc(f"the number of user appear repeat interaction:{len(rep)}")
-        mlm = [user, item]
-
-        max_node = [max(i) + 1 for i in mlm]
-
-    elif isinstance(data, list):
-        data = np.array(data)
-        mlm = [list(data[:, 0]), list(data[:, 1]), list(data[:, 2])]
-        l = len(data)
-        s = list(zip(mlm[0], mlm[1], mlm[2]))
-        if len(s) != len(set(s)):
-            printc(f"repeat assignment:{len(s)-len(set(s))}")
-            l = len(set(s))
-        cnt += l
-        max_node = [max(i) + 1 for i in mlm]
-
-    printc(f"number interaction:{cnt}")
-    printc("(max len(set) min) statistic:")
-    printc(f"{[(max(i),len(set(i)),min(i)) for i in mlm]}")
-
-    return max_node
-
-
-def user_interaction(file_path, file_name):
-    '''
-    every line is one user' interactions, [u,i,...,i]
-    '''
-    printc(f"{file_name}-user_interaction")
-    user_item = defaultdict(list)
-    with open(os.path.join(file_path, file_name), 'r') as f:
+    with open(file, "r") as f:
         for line in f.readlines():
-            l = line.strip('\n').split(' ')
-            u = int(l[0])
-            i = [int(i) for i in l[1:]]
-            user_item[u].extend(i)
+            data = [int(x) for x in line.strip().split(' ')]
+            u, item = data[0], data[1:]
+            items = list(set(item))
+            if len(items) > 0:
+                if u in u_items_dict.keys():
+                    rep_u += 1
+                    item = u_items_dict[u] + items
+                    items = list(set(item))
+                u_items_dict[u] = items
 
-    max_node = data_statistic(user_item)
+            rep_i += len(item) - len(items)
 
-    return user_item, max_node
+    print(f"got data from {file},time spend:{(time.time()-start)/60:.2}")
+    print(f"\tfile data info [repeat user:{rep_u},repeat item:{rep_i}]")
+    return u_items_dict
 
 
-def user_assignment(file_path, file_name, least=0, use_tag=False):
+#----------------------------convert np dict sp----------------------------------------
+def to_sparse_adj(row, col, shape):
+    val = np.ones_like(row)
+    adj = sp.coo_matrix((val, (row, col)), dtype=np.float32, shape=shape)
+    return adj
+
+
+def dict2np_array(data_dict):
+    new_data = []
+    for u, i in data_dict.items():
+        ui = list(zip([u] * len(i), i))
+        new_data.extend(ui)
+
+    column_info(new_data)
+    return np.array(new_data)
+
+
+#------------------------------tgcn sample--------------------------------------
+def neighbor_sample(matrix, k):
     '''
-    evert line is just one interaction/assignment, [u,i,t]\n
-    least: delete the tags that appear times less than least
+    对交互矩阵的`每一行`非0元素下标 `有放回地`采样K个,如果没有，则采样k个0\n
+    return: [data,weight] 采样的邻域下标, 和对应的权重
     '''
-    printc(f"{file_name}-user_assignment")
-    tag_count = defaultdict(int)
-    data = list()
-    user_item = defaultdict(set)
-    with open(os.path.join(file_path, file_name), 'r') as f:
-        for line in f.readlines()[1:]:
-            u, i, t = list(map(int, line.strip('\n').split('\t')[:3]))
-            tag_count[t] += 1
-            data.append([u, i, t])
-            user_item[u].add(i)
-        max_node = data_statistic(data)
+    matrix = matrix.tocsr()
+    data = np.zeros((matrix.shape[0], k), dtype=np.int)
+    weight = np.zeros((matrix.shape[0], k), dtype=np.int)
+    for i in range(matrix.shape[0]):
+        nonzeroId = matrix[i].nonzero()[1]
+        if len(nonzeroId):
+            sampleId = np.random.choice(nonzeroId, k)
+            # 将采样下标整体加一
+            data[i] = sampleId + 1
 
-    new_data = list()
-    if least > 0:
-        user_item = defaultdict(set)
-        cnt = 0
-        for x in data:
-            u, i, t = x
-            if tag_count[t] < least:
-                cnt += 1
-                continue
-            new_data.append(x)
-            user_item[u].add(i)
-        data = new_data
-        printc(f"delete {cnt} assignments which tag appear times less than {least}")
-        max_node = data_statistic(data)
+            weight[i] = matrix[i].toarray()[0, sampleId]
 
-    if use_tag == False:
-        data = None
+    return [data, weight]
 
-    return user_item, data, max_node
+
+def all_neighbor_sample(X):
+    matrix, max_deg = X
+    matrix = matrix.tocsr()
+    #max_deg = int(max(matrix.getnnz(1)))
+    data = np.zeros((matrix.shape[0], max_deg), dtype=np.int)
+    weight = np.zeros((matrix.shape[0], max_deg), dtype=np.int)
+    for i in range(matrix.shape[0]):
+        nonzeroId = matrix[i].nonzero()[1]
+        x = len(nonzeroId)
+        if x == 0:
+            continue
+        elif x < max_deg:
+            sampleId = np.random.choice(nonzeroId, max_deg)
+        else:
+            sampleId = np.random.choice(nonzeroId, max_deg, replace=False)
+
+        data[i] = sampleId + 1
+        weight[i] = matrix[i].toarray()[0, sampleId]
+
+    return [data, weight]
+
+#----------------------------------------------------------------------------
+def column_info(data_list):
+    data = np.array(data_list)
+    print(f"\t[{data.shape[0]}]:(unique,min,max)")
+    max_list = []
+    for i in range(data.shape[1]):
+        col = data[:, i]
+        max_list.append(max(col))
+        print(f"\tcolumn {i}:[{len(set(col)),min(col),max(col)}]")
+
+    return max_list
+
+
+def dict_info(dict_data):
+    user, item = [], []
+    for u, i in dict_data.items():
+        user.extend([u] * len(i))
+        item.extend(list(i))
+    data = np.stack([user, item]).T
+    max_list = column_info(data)
+
+    return data, max_list
+
+
+#--------------------------------------------------------------------------
+

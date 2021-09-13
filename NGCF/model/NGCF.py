@@ -1,127 +1,112 @@
+import model.help as utils
+from utility.word import CFG
+
 import torch
-from torch.nn import Embedding, init, ModuleList, Linear
-from torch_geometric.nn import MessagePassing
-from .utils import get_norm, get_all_rating, get_bpr_score
+import torch.nn as nn
 import torch.nn.functional as F
 
-# # class every GCN layer
-# class GCN(MessagePassing):
-#     def __init__(self, in_fea, out_fea, num_node, drop_rate):
-#         super(GCN, self).__init__(aggr='add')
-#         self.num_node = num_node
-#         self.drop_rate = drop_rate
-#         self.liner1 = Linear(in_fea, out_fea)
-#         init.xavier_uniform_(self.liner1.weight)  # 似乎没有影响
-#         self.liner2 = Linear(in_fea, out_fea)
-#         init.xavier_uniform_(self.liner2.weight)
 
-#     def forward(self, x, edge_index):
-#         edge_index, norm = get_norm(edge_index, self.num_node, add_self_loop=True, p=-1, norm=1)
-#         # # paper function
-#         # out = self.propagate(edge_index, x=x, norm=norm)
-#         # out += self.liner1(x)
-#         # return F.leaky_relu(out)
-#         emb = self.propagate(edge_index, x=x, norm=norm)
-#         sum_emb = self.liner1(emb)
-#         bi_emb = x * emb
-#         bi_emb = self.liner2(bi_emb)
-#         return F.leaky_relu(sum_emb + bi_emb, negative_slope=0.2)
+class NGCF(nn.Module):
+    def __init__(self, data, args=None):
+        super().__init__()
+        self._config(CFG)
 
-#     def message(self, x_i, x_j, norm):
-#         # # paper function
-#         # return norm.view(-1, 1) * (self.liner1(x_j) + self.liner2(x_i * x_j))
-#         drop = F.dropout(norm, p=0.9, training=self.training)
-#         return drop.view(-1, 1) * x_j
+        if self.use_tag:
+            self.num_list = [data.num['user'], data.num['item'], data.num['tag']]
+        else:
+            self.num_list = [data.num['user'], data.num['item']]
 
-# class NGCF(torch.nn.Module):
-#     def __init__(self, cfg):
-#         super(NGCF, self).__init__()
-#         self.drop_rate = cfg.drop_rate
-#         self.num_layer = len(cfg.layer_embed) - 1
-#         self.num_node = sum(cfg.node_list)
-#         self.gcn = ModuleList()
-#         self.embedding = ModuleList()
-#         for num_node in cfg.node_list:
-#             emb = Embedding(num_node, cfg.layer_embed[0])
-#             init.xavier_uniform_(emb.weight)  # 加上，性能有所提升
-#             self.embedding.append(emb)
-#         for i in range(self.num_layer):
-#             self.gcn.append(GCN(cfg.layer_embed[i], cfg.layer_embed[i + 1], self.num_node, self.drop_rate))
+        self.norm_adj = utils.creat_adj(data, self.use_tag, self.norm_type, \
+            self.split_adj_k, self.device)
+        self._init_weight()
 
-#     def forward(self, edge_index):
+        print(f"NGCF got ready!!!")
 
-#         x = torch.cat([i.weight for i in self.embedding])
-#         out = [x]
-#         for i in range(self.num_layer):
-#             x = self.gcn[i](x, edge_index)
-#             x = F.dropout(x, p=self.drop_rate, training=self.training)
-#             x = F.normalize(x, p=2, dim=1)
-#             out.append(x)
+    def _config(self, config):
+        self.dim_latent = config['dim_latent']
+        self.dim_layer_list = config['dim_layer_list']
+        self.num_layer = len(self.dim_layer_list)
+        self.dim_layer_list = [self.dim_latent] + self.dim_layer_list
+        self.agg_type = config['agg_type']
+        self.device = config['device']
+        self.message_drop_list = config['message_drop_list']
+        self.norm_type = config['norm_type']
+        self.split_adj_k = config["split_adj_k"]
+        self.reg = config['reg']
+        self.loss_func = config['mul_loss_func']
+        self.use_tag = config['use_tag']
 
-#         out = torch.cat(out, dim=1)
-#         return out
+    def _init_weight(self):
+        # embedding
+        self.embed = nn.ParameterList()
+        for num in self.num_list:
+            self.embed.append(nn.Parameter(torch.Tensor(num, self.dim_latent)))
+        # matrix
+        self.mat = nn.ParameterDict()
+        for k in range(self.num_layer):
+            self.mat.update({
+                f"W1_{k}": nn.Parameter(torch.Tensor(self.dim_layer_list[k], self.dim_layer_list[k + 1])),
+                f"b1_{k}": nn.Parameter(torch.Tensor(1, self.dim_layer_list[k + 1])),
+            })
 
+            if self.agg_type == "bi_agg":
+                self.mat.update({
+                    f"W2_{k}": nn.Parameter(torch.Tensor(self.dim_layer_list[k], self.dim_layer_list[k + 1])),
+                    f"b2_{k}": nn.Parameter(torch.Tensor(1, self.dim_layer_list[k + 1])),
+                })
+        # init
+        initialer = nn.init.xavier_uniform_
+        for p in self.parameters():
+            initialer(p)
 
-class NGCF(MessagePassing):
-    def __init__(self, cfg):
-        super(NGCF, self).__init__(aggr='add')
-        self.drop_rate = cfg.drop_rate
-        self.drop_node = cfg.drop_node
-        self.num_layer = len(cfg.layer_embed) - 1
-        self.num_node = sum(cfg.node_list)
-        self.embedding = ModuleList()
-        self.lin1 = ModuleList()
-        self.lin2 = ModuleList()
-        for num_node in cfg.node_list:
-            emb = Embedding(num_node, cfg.layer_embed[0])
-            init.xavier_uniform_(emb.weight)
-            self.embedding.append(emb)
+    def forward(self):
+        all_embed = torch.cat(list(self.embed), dim=0)
 
-        for i in range(self.num_layer):
-            lin1 = Linear(cfg.layer_embed[i], cfg.layer_embed[i + 1])
-            init.xavier_uniform_(lin1.weight)
-            lin2 = Linear(cfg.layer_embed[i], cfg.layer_embed[i + 1])
-            init.xavier_uniform_(lin2.weight)
-            self.lin1.append(lin1)
-            self.lin2.append(lin2)
+        if self.agg_type == "bi_agg":
+            all_embed = self.bi_inter_embed(all_embed)
+        else:
+            raise NotImplementedError
 
-    def forward(self, edge_index):
-        x = torch.cat([i.weight for i in self.embedding])
-        # edge_index, norm = get_norm(edge_index, self.num_node, add_self_loop=False)
-        edge_index, norm = get_norm(edge_index, self.num_node, add_self_loop=True, p=-1.0, norm=1)
-        norm = F.dropout(norm, p=self.drop_node, training=self.training)
-        out = [x]
-        for i in range(self.num_layer):
-            # x_l = x
-            # y = self.propagate(edge_index, x=x, norm=norm, lin1=self.lin1[i], lin2=self.lin2[i])
-            # y += self.lin1[i](x_l)
+        list_embed = torch.split(all_embed, self.num_list, dim=0)
+        return list_embed
 
-            s = self.propagate(edge_index, x=x, norm=norm)
-            b1 = self.lin1[i](s)
-            b2 = self.lin2[i](s * x)
-            y = b1 + b2
+    def bi_inter_embed(self, all_embed):
+        all_embed_list = [all_embed]
+        for k in range(self.num_layer):
+            nei_embed = utils.split_mm(self.norm_adj, all_embed)
+            sum_embed = nei_embed + all_embed
+            sum_embed = torch.matmul(sum_embed, self.mat[f'W1_{k}'] + self.mat[f'b1_{k}'])
+            sum_embed = nn.LeakyReLU(negative_slope=0.2)(sum_embed)
 
-            x = F.leaky_relu(y, negative_slope=0.2)
-            x = F.dropout(x, p=self.drop_rate, training=self.training)
-            n = F.normalize(x, p=2, dim=1)
-            out.append(n)
+            bi_embed = torch.mul(nei_embed, all_embed)
+            bi_embed = torch.matmul(bi_embed, self.mat[f'W2_{k}'] + self.mat[f'b2_{k}'])
+            bi_embed = nn.LeakyReLU(negative_slope=0.2)(bi_embed)
+            all_embed = sum_embed + bi_embed
+            all_embed = F.dropout(all_embed, p=self.message_drop_list[k], training=self.training)
+            norm_embed = F.normalize(all_embed, p=2, dim=1)
+            all_embed_list += [norm_embed]
 
-        out = torch.cat(out, dim=1)
-        return out
+        all_embed = torch.cat(all_embed_list, dim=1)
+        return all_embed
 
-    # def message(self, x_i, x_j, norm, lin1, lin2):
-    #     return norm.view(-1, 1) * (lin1(x_j) + lin2(x_i * x_j))
+    def get_ego_emb(self):
+        return list(self.embed)
 
-    def message(self, x_j, norm):
-        return norm.view(-1, 1) * x_j
+    def loss(self, batch_data):
+        users, pos_items, neg_items = batch_data.T
+        all_users, all_items = self.forward()[:2]
+        users_emb = all_users[users.long()]
+        pos_emb = all_items[pos_items.long()]
+        neg_emb = all_items[neg_items.long()]
 
-    def loss(self, x, emb, cfg):
-        init_emb = torch.cat([i.weight for i in self.embedding])
+        loss = utils.mul_loss(users_emb, pos_emb, neg_emb, self.loss_func)
+        reg_loss = utils.l2reg_loss(users_emb, pos_emb, neg_emb)
 
-        pos_scores, neg_scores, reg_loss = get_bpr_score(x, emb, init_emb, cfg.node_list[0])
-        loss = -1 * torch.mean(torch.nn.functional.logsigmoid(pos_scores - neg_scores))
+        return loss, self.reg * reg_loss
 
-        return loss + reg_loss * cfg.weight_decay
-
-    def users_rating(self, users, emb, cfg):
-        return get_all_rating(users, emb, cfg.node_list[0], cfg.node_list[1])
+    def predict_rating(self, users):
+        all_users, all_items = self.forward()[:2]
+        users_emb = all_users[users]
+        items_emb = all_items
+        rating = torch.nn.Sigmoid()(torch.matmul(users_emb, items_emb.t()))
+        return rating

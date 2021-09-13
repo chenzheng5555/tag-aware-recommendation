@@ -1,85 +1,41 @@
+from utility.word import CFG, Global
+from utility.utils import printc, init_seed
+from com import model_dict
+
 import torch
-import torch.nn as nn
-from torch.utils.data import DataLoader
-from tqdm import tqdm
-from torch import optim
-from tensorboardX import SummaryWriter
-import time
+import warnings
+import multiprocessing
 
-from utility import get_metrics, parse, compute_all_metric, set_seed
-from data import DataBase, TrainSet, TestSet, TransTag
-from model import LightGCN, NGCF, MF
-
-
-def train():
-    testset = TestSet(database)
-    testloader = DataLoader(testset, cfg.batch_s, shuffle=True, num_workers=0)
-    for epoch in range(cfg.epoch):
-        trainset = TrainSet(database, cfg.neg_sample_k)
-        trainloader = DataLoader(trainset, cfg.batch_t, shuffle=True, num_workers=0)
-        model.train()
-        all_loss = 0.0
-        for i, data in tqdm(enumerate(trainloader, start=1)):
-            data = [x.to(cfg.device) for x in data]
-            layer_emd = model.forward(database.edge_index)
-            loss = model.loss(data, layer_emd, cfg)
-            opt = opt_func(model.parameters(), lr=cfg.lr)
-
-            opt.zero_grad()
-            loss.backward()
-            opt.step()
-            all_loss += loss.item()
-            if cfg.board:
-                w.add_scalar(f'Train/train loss', all_loss, epoch * int(len(trainset) / cfg.batch_t) + i)
-
-        print(f"Epoch:{epoch}:{i} sum loss:{all_loss}")
-        test(testloader, epoch)
-
-
-@torch.no_grad()
-def test(testloader, epoch):
-    model.eval()
-    metrics = []
-    for _, data in tqdm(enumerate(testloader, start=1)):
-        layer_emd = model.forward(database.edge_index)
-        rating = model.users_rating(data, layer_emd, cfg)
-        met = get_metrics(data.numpy(), database, rating.cpu(), cfg.top_k, cfg.all_user)
-        metrics.append(met)
-    results = compute_all_metric(metrics, cfg.top_k, cfg.all_user)
-    print(f"{results}")
-    if cfg.board:
-        w.add_scalars(f'Test/Recall@{cfg.top_k}', {str(cfg.top_k[i]): results['recall'][i] for i in range(len(cfg.top_k))}, epoch)
-        w.add_scalars(f'Test/Precision@{cfg.top_k}', {str(cfg.top_k[i]): results['precision'][i] for i in range(len(cfg.top_k))}, epoch)
-        w.add_scalars(f'Test/NDCG@{cfg.top_k}', {str(cfg.top_k[i]): results['ndcg'][i] for i in range(len(cfg.top_k))}, epoch)
-        w.add_scalars(f'Test/HR@{cfg.top_k}', {str(cfg.top_k[i]): results['HR'][i] for i in range(len(cfg.top_k))}, epoch)
-        w.add_scalar(f'Test/auc@{cfg.top_k}', results['auc'][0], epoch)
-
+warnings.filterwarnings("ignore")
 
 if __name__ == "__main__":
-    model_name = {"LightGCN": LightGCN, "NGCF": NGCF, 'MF': MF}
-    opt_name = {"adam": optim.Adam, "rmsprop": optim.RMSprop}
-    cfg = parse()
-    set_seed(cfg.seed)
+    GLO = Global()   # 多线程只会多次执行外面
+    #GLO.pool = multiprocessing.Pool(CFG['cpu_core'])
 
-    cfg.device = torch.device('cuda' if torch.cuda.is_available() else "cpu")
-    cfg.top_k = eval(cfg.top_k)
-    cfg.layer_embed = eval(cfg.layer_embed)
-    database = DataBase(cfg)
-    database.edge_index = torch.tensor(list(database.edge_index), dtype=torch.long).contiguous().t()
-    database.edge_index = database.edge_index.to(cfg.device)
+    init_seed(CFG['seed'])
+    model_name = CFG['model']
+    if CFG['model'][:4] == 'dtag':
+        model_name = 'dtag'
+    model, train, test = model_dict[model_name](GLO)
+    printc(f"config:{CFG}")
+    train.run(model)
 
-    cfg.node_list = database.node_list
-    print(f"{'='*50}\n====={cfg}\n{'='*50}")
+    #model = torch.load(f"{GLO.out_dir}/model.pth.tar") #有时会出错
+    model.load_state_dict(torch.load(f"{GLO.out_dir}/model.pth.tar", map_location=CFG['device']))
 
-    model = model_name[cfg.model](cfg).to(cfg.device)
-    opt_func = opt_name[cfg.optim]
-    #for name, param in model.named_parameters():print(name,param)
-    if cfg.board:
-        w: SummaryWriter = SummaryWriter(f"run/{cfg.model}/{time.strftime('%m-%d-%H-%M')}")
-        w.add_text('config', f'{cfg}', 0)
+    if CFG['has_val']:
+        results = test.run(model, istest=True)
+        printc(f"test result: [{results}]")
+        if GLO.writer:
+            GLO.writer.add_text("LOG", f"test results: [{results}]")
 
-    train()
-    if cfg.board:
-        w.close()
+    results = test.run(model, istest=True, group_k=4)
+    printc(f"group: [{results}]")
 
-    torch.save(model.state_dict(), "model.pth.tar")
+    if GLO.writer:
+        GLO.writer.add_text("LOG", f"group results: [{results}]")
+        GLO.writer.add_text("LOG", f"config: [{CFG}], out_path={GLO.out_dir}")
+        GLO.writer.close()
+    
+    if GLO.pool:
+        GLO.pool.close()
